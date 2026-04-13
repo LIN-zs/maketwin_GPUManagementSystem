@@ -1,12 +1,15 @@
 from django.apps import AppConfig
-from django_q.models import Schedule
+
 
 class SystemIntegrationConfig(AppConfig):
     default_auto_field = 'django.db.models.BigAutoField'
     name = 'system_integration'
 
+
     def ready(self):
-        # 避免重复创建
+        # ✅ 在 ready() 方法内部导入模型
+        from django_q.models import Schedule
+        # 避免重复创建（可选，但建议保留）
         if not Schedule.objects.filter(name='expire_reservations').exists():
             Schedule.objects.create(
                 name='expire_reservations',

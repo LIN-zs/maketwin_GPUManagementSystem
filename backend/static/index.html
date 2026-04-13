@@ -1,0 +1,406 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>课题组GPU预约管理系统</title>
+  <link rel="stylesheet" href="https://cdn.bootcdn.net/ajax/libs/element-plus/2.8.0/index.css">
+  <script src="https://cdn.bootcdn.net/ajax/libs/vue/3.4.0/vue.global.prod.js"></script>
+  <script src="https://cdn.bootcdn.net/ajax/libs/element-plus/2.8.0/index.full.min.js"></script>
+  <script src="https://cdn.bootcdn.net/ajax/libs/axios/1.6.0/axios.min.js"></script>
+  <style>
+    body{margin:0;padding:20px;background:#f5f7fa;font-family: Arial, "PingFang SC", "Microsoft YaHei", sans-serif;}
+    .container{max-width: 1400px;margin:0 auto;}
+    .card{padding:20px;background:#fff;border-radius:8px;margin-bottom:20px;box-shadow: 0 2px 12px 0 rgba(0,0,0,0.1);}
+    .title { display: flex; align-items: center; margin-bottom: 15px; color: #303133; }
+    .gpu-table { width: 100%; border-collapse: collapse; text-align: center; font-size: 14px; }
+    .gpu-table th, .gpu-table td { border: 1px solid #e4e7ed; padding: 12px 8px; min-width: 100px; height: 60px; vertical-align: middle; }
+    .gpu-table th { background-color: #f5f7fa; font-weight: 600; color: #606266; }
+    .gpu-table th:first-child, .gpu-table td:first-child { min-width: 120px; font-weight: bold; background-color: #fafafa; }
+    .cell-free { background-color: #f0f9eb; color: #67c23a; cursor: pointer; transition: all 0.2s; }
+    .cell-free:hover { background-color: #e1f3d8; transform: scale(1.02); }
+    .cell-used { background-color: #fef0f0; color: #f56c6c; cursor: not-allowed; }
+    .admin-panel { margin-top: 20px; border-top: 2px solid #e4e7ed; padding-top: 20px; }
+  </style>
+</head>
+<body>
+<div id="app" class="container">
+  <div style="background:#409eff;color:white;padding:14px;border-radius:8px;margin-bottom:20px">
+    <h2 style="margin:0">课题组GPU预约管理系统</h2>
+    <div v-if="isLogin" style="float:right; margin-top:-30px;">
+      <span>欢迎，{{ currentUser.username }}</span>
+      <el-button type="text" style="color:white" @click="logout">退出</el-button>
+    </div>
+  </div>
+
+  <!-- 登录界面 -->
+  <div v-if="!isLogin" class="card">
+    <h3>用户登录</h3>
+    <el-form label-width="80px">
+      <el-form-item label="账号">
+        <el-input v-model="username" placeholder="请输入账号"></el-input>
+      </el-form-item>
+      <el-form-item label="密码">
+        <el-input v-model="password" type="password" placeholder="请输入密码"></el-input>
+      </el-form-item>
+      <el-button type="primary" @click="login">登录</el-button>
+    </el-form>
+  </div>
+
+  <!-- 主功能界面 -->
+  <div v-else>
+    <!-- 预约表格 -->
+    <div class="card">
+      <div class="title">
+        <h3 style="margin:0">GPU 时段预约表</h3>
+        <span style="margin-left: 20px; font-size: 14px; color: #606266;">
+          <i class="el-icon-circle-check" style="color:#67c23a"></i> 绿色 = 可预约 |
+          <i class="el-icon-circle-close" style="color:#f56c6c"></i> 红色 = 已占用
+        </span>
+        <div style="margin-left: auto;">
+          <el-date-picker v-model="selectedDate" type="date" placeholder="选择日期" format="YYYY-MM-DD" value-format="YYYY-MM-DD"></el-date-picker>
+        </div>
+      </div>
+
+      <table class="gpu-table">
+        <thead>
+          <tr>
+            <th>显卡编号</th>
+            <th v-for="time in timeSlots" :key="time.key">{{ time.name }}</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-for="gpu in gpuList" :key="gpu.id">
+            <td>{{ gpu.name }}</td>
+            <td
+              v-for="time in timeSlots"
+              :key="`${gpu.id}-${time.key}`"
+              :class="{ 'cell-free': isFree(gpu.id, time.key), 'cell-used': !isFree(gpu.id, time.key) }"
+              @click="openSelectModal(gpu.id, time.key, time.name)"
+            ></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- 权限申请 -->
+    <div class="card">
+      <h3>🔐 权限申请（sudo等）</h3>
+      <el-form label-width="120px">
+        <el-form-item label="需要的命令/权限">
+          <el-input v-model="permission.desc" type="textarea" rows="2"></el-input>
+        </el-form-item>
+        <el-form-item label="申请理由">
+          <el-input v-model="permission.reason" type="textarea" rows="2"></el-input>
+        </el-form-item>
+        <el-button type="warning" @click="submitPermission">提交申请</el-button>
+      </el-form>
+    </div>
+
+    <!-- 管理员面板 -->
+    <div v-if="currentUser.role === 'admin'" class="card admin-panel">
+      <h3>👑 管理员审核面板</h3>
+      <el-tabs>
+        <el-tab-pane label="待审批预约">
+          <el-table :data="pendingReservations" border>
+            <el-table-column prop="user.username" label="申请人"></el-table-column>
+            <el-table-column prop="gpu.name" label="显卡"></el-table-column>
+            <el-table-column prop="start_time" label="开始时间"></el-table-column>
+            <el-table-column prop="end_time" label="结束时间"></el-table-column>
+            <el-table-column label="操作">
+              <template #default="scope">
+                <el-button size="small" type="success" @click="approveReservation(scope.row.id)">批准</el-button>
+                <el-button size="small" type="danger" @click="rejectReservation(scope.row.id)">拒绝</el-button>
+              </template>
+            </el-table-column>
+          </el-table>
+        </el-tab-pane>
+        <el-tab-pane label="待审批Sudo申请">
+          <el-table :data="pendingSudoRequests" border>
+            <el-table-column prop="user.username" label="申请人"></el-table-column>
+            <el-table-column prop="reason" label="申请理由"></el-table-column>
+            <el-table-column label="操作">
+              <template #default="scope">
+                <el-button size="small" type="success" @click="approveSudo(scope.row.id)">批准</el-button>
+                <el-button size="small" type="danger" @click="rejectSudo(scope.row.id)">拒绝</el-button>
+              </template>
+            </el-table-column>
+          </el-table>
+        </el-tab-pane>
+      </el-tabs>
+    </div>
+  </div>
+
+  <!-- 弹窗：填写预约用途 -->
+  <el-dialog
+    title="填写预约用途"
+    v-model="selectModal.visible"
+    @close="selectModal = { visible: false, gpuId: '', timeKey: '', timeName: '' }"
+  >
+    <el-form label-width="80px">
+      <el-form-item label="显卡">
+        <el-input :value="`GPU ${selectModal.gpuId} (${selectModal.timeName})`" disabled></el-input>
+      </el-form-item>
+      <el-form-item label="用途说明">
+        <el-input v-model="reserveForm.reason" type="textarea" rows="3" placeholder="请输入本次实验/任务的用途"></el-input>
+      </el-form-item>
+    </el-form>
+    <template #footer>
+      <el-button @click="selectModal.visible = false">取消</el-button>
+      <el-button type="primary" @click="submitReservation">确定</el-button>
+    </template>
+  </el-dialog>
+</div>
+
+<script>
+const { createApp, ref, reactive, onMounted } = Vue;
+const { ElMessage } = ElementPlus;
+
+const API_BASE_URL = "http://127.0.0.1:8000";
+
+// 辅助函数：获取CSRF Token
+function getCookie(name) {
+  let cookieValue = null;
+  if (document.cookie && document.cookie !== '') {
+    const cookies = document.cookie.split(';');
+    for (let i = 0; i < cookies.length; i++) {
+      const cookie = cookies[i].trim();
+      if (cookie.substring(0, name.length + 1) === (name + '=')) {
+        cookieValue = decodeURIComponent(cookie.substring(name.length + 1));
+        break;
+      }
+    }
+  }
+  return cookieValue;
+}
+
+// 配置axios默认携带CSRF
+axios.defaults.xsrfCookieName = 'csrftoken';
+axios.defaults.xsrfHeaderName = 'X-CSRFToken';
+axios.defaults.withCredentials = true;
+
+createApp({
+  setup() {
+    const isLogin = ref(false);
+    const username = ref("");
+    const password = ref("");
+    const currentUser = ref({});
+    const selectedDate = ref(new Date().toISOString().slice(0,10));
+
+    // 显卡列表
+    const gpuList = ref([
+      { id: 1, name: "GPU 1" }, { id: 2, name: "GPU 2" }, { id: 3, name: "GPU 3" }, { id: 4, name: "GPU 4" },
+      { id: 5, name: "GPU 5" }, { id: 6, name: "GPU 6" }, { id: 7, name: "GPU 7" }, { id: 8, name: "GPU 8" }
+    ]);
+    // 时间段
+    const timeSlots = ref([
+      { key: 0, name: "08:00 - 12:00", start: "08:00", end: "12:00" },
+      { key: 1, name: "12:00 - 16:00", start: "12:00", end: "16:00" },
+      { key: 2, name: "16:00 - 20:00", start: "16:00", end: "20:00" },
+      { key: 3, name: "20:00 - 24:00", start: "20:00", end: "24:00" }
+    ]);
+
+    // 从后端获取的预约原始数据
+    const reservations = ref([]);
+    // 管理员面板数据
+    const pendingReservations = ref([]);
+    const pendingSudoRequests = ref([]);
+
+    // 弹窗相关
+    const selectModal = reactive({ visible: false, gpuId: "", timeKey: "", timeName: "" });
+    const reserveForm = reactive({ reason: "" });
+    const permission = reactive({ desc: "", reason: "" });
+
+    // 登录
+    const login = async () => {
+      try {
+        const res = await axios.post(`${API_BASE_URL}/api/auth/login/`, {
+          username: username.value,
+          password: password.value
+        });
+        if (res.data.error) {
+          ElMessage.error(res.data.error);
+        } else {
+          currentUser.value = res.data;
+          isLogin.value = true;
+          ElMessage.success("登录成功");
+          await fetchAllData();
+        }
+      } catch (e) {
+        ElMessage.error("登录失败，请检查网络或用户名密码");
+      }
+    };
+
+    const logout = async () => {
+      await axios.post(`${API_BASE_URL}/api/auth/logout/`);
+      isLogin.value = false;
+      currentUser.value = {};
+      ElMessage.success("已退出");
+    };
+
+    // 获取所有预约（公共日历）
+    const fetchReservations = async () => {
+      const res = await axios.get(`${API_BASE_URL}/api/reservations/reservations/all/`);
+      reservations.value = res.data;
+    };
+
+    // 判断某个格子是否被占用
+    const isFree = (gpuId, timeKey) => {
+      if (!selectedDate.value) return true;
+      const dateStr = selectedDate.value;
+      const slot = timeSlots.value[timeKey];
+      if (!slot) return true;
+      // 构建起止时间
+      const startDateTime = `${dateStr} ${slot.start}:00`;
+      const endDateTime = `${dateStr} ${slot.end}:00`;
+      // 查找是否有重叠的已批准预约
+      return !reservations.value.some(r => {
+        if (r.gpu.id !== gpuId) return false;
+        if (r.status !== 'approved') return false;
+        const rStart = new Date(r.start_time);
+        const rEnd = new Date(r.end_time);
+        const start = new Date(startDateTime);
+        const end = new Date(endDateTime);
+        return (start < rEnd && end > rStart);
+      });
+    };
+
+    // 打开预约弹窗
+    const openSelectModal = (gpuId, timeKey, timeName) => {
+      if (!isFree(gpuId, timeKey)) {
+        ElMessage.warning("该时段已被占用");
+        return;
+      }
+      selectModal.gpuId = gpuId;
+      selectModal.timeKey = timeKey;
+      selectModal.timeName = timeName;
+      selectModal.visible = true;
+      reserveForm.reason = "";
+    };
+
+    // 提交预约
+    const submitReservation = async () => {
+      if (!reserveForm.reason.trim()) {
+        ElMessage.warning("请输入用途说明");
+        return;
+      }
+      if (!selectedDate.value) {
+        ElMessage.warning("请选择日期");
+        return;
+      }
+      const slot = timeSlots.value[selectModal.timeKey];
+      const start_time = `${selectedDate.value} ${slot.start}:00`;
+      const end_time = `${selectedDate.value} ${slot.end}:00`;
+      try {
+        await axios.post(`${API_BASE_URL}/api/reservations/reservations/create/`, {
+          gpu: selectModal.gpuId,
+          start_time: start_time,
+          end_time: end_time,
+          remark: reserveForm.reason
+        });
+        ElMessage.success("预约提交成功");
+        selectModal.visible = false;
+        await fetchReservations();
+        // 如果是管理员，刷新待审批列表
+        if (currentUser.value.role === 'admin') {
+          fetchPendingReservations();
+        }
+      } catch (e) {
+        ElMessage.error("预约失败：" + (e.response?.data?.non_field_errors?.[0] || "未知错误"));
+      }
+    };
+
+    // 权限申请
+    const submitPermission = async () => {
+      if (!permission.desc.trim() && !permission.reason.trim()) {
+        ElMessage.warning("请填写申请内容");
+        return;
+      }
+      try {
+        await axios.post(`${API_BASE_URL}/api/sudo/create/`, {
+          reason: `命令: ${permission.desc}\n理由: ${permission.reason}`
+        });
+        ElMessage.success("权限申请已提交");
+        permission.desc = "";
+        permission.reason = "";
+      } catch (e) {
+        ElMessage.error("提交失败");
+      }
+    };
+
+    // 管理员：获取待审批预约
+    const fetchPendingReservations = async () => {
+      const res = await axios.get(`${API_BASE_URL}/api/reservations/admin/pending/`);
+      pendingReservations.value = res.data;
+    };
+
+// 批准
+const approveReservation = async (id) => {
+  try {
+    await axios.put(`${API_BASE_URL}/api/reservations/admin/approve/${id}/`);
+    ElMessage.success("已批准");
+    fetchPendingReservations();
+    fetchReservations();
+  } catch (e) {
+    ElMessage.error(e.response?.data?.error || "批准失败");
+  }
+};
+
+// 拒绝
+const rejectReservation = async (id) => {
+  try {
+    await axios.put(`${API_BASE_URL}/api/reservations/admin/reject/${id}/`, { remark: "管理员拒绝" });
+    ElMessage.success("已拒绝");
+    fetchPendingReservations();
+  } catch (e) {
+    ElMessage.error(e.response?.data?.error || "拒绝失败");
+  }
+};
+    // 管理员：待审批Sudo
+    const fetchPendingSudo = async () => {
+      const res = await axios.get(`${API_BASE_URL}/api/sudo/admin/pending/`);
+      pendingSudoRequests.value = res.data;
+    };
+    const approveSudo = async (id) => {
+      await axios.post(`${API_BASE_URL}/api/sudo/admin/approve/${id}/`, { valid_days: 7 });
+      ElMessage.success("已批准Sudo权限");
+      fetchPendingSudo();
+    };
+    const rejectSudo = async (id) => {
+      await axios.post(`${API_BASE_URL}/api/sudo/admin/reject/${id}/`);
+      ElMessage.success("已拒绝");
+      fetchPendingSudo();
+    };
+
+    // 加载所有数据（登录后）
+    const fetchAllData = async () => {
+      await fetchReservations();
+      if (currentUser.value.role === 'admin') {
+        await fetchPendingReservations();
+        await fetchPendingSudo();
+      }
+    };
+
+    onMounted(() => {
+      // 检查是否已有session（通过访问me接口）
+      axios.get(`${API_BASE_URL}/api/auth/me/`).then(res => {
+        if (res.data.username) {
+          currentUser.value = res.data;
+          isLogin.value = true;
+          fetchAllData();
+        }
+      }).catch(() => {});
+    });
+
+    return {
+      isLogin, username, password, currentUser, selectedDate,
+      gpuList, timeSlots, reservations,
+      isFree, openSelectModal, selectModal, reserveForm, submitReservation,
+      login, logout, submitPermission, permission,
+      pendingReservations, pendingSudoRequests,
+      approveReservation, rejectReservation, approveSudo, rejectSudo
+    };
+  }
+}).use(ElementPlus).mount('#app');
+</script>
+</body>
+</html>

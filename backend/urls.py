@@ -16,19 +16,22 @@ Including another URLconf
 """
 from django.contrib import admin
 from django.urls import path
+from django.shortcuts import redirect
 
-urlpatterns = [
-    path('admin/', admin.site.urls),
-]
 from django.contrib import admin
 from django.urls import path, include
-
+from accounts.views import LoginView, LogoutView, UserInfoView
 urlpatterns = [
     path('admin/', admin.site.urls),
     path('api/reservations/', include('reservations.urls')),
     path('api/sudo/', include('sudo_requests.urls')),
+    path('api/auth/login/', LoginView.as_view()),
+    path('api/auth/logout/', LogoutView.as_view()),
+    path('api/auth/me/', UserInfoView.as_view()),
+    path('', lambda request: redirect('/static/index.html')),   # 根路径重定向
 ]
 from rest_framework.urls import path as drf_path
 urlpatterns += [
     drf_path('api-auth/', include('rest_framework.urls')),  # 提供登录/登出
 ]
+
