@@ -1,12 +1,11 @@
 from django.shortcuts import render
-
 # Create your views here.
 from rest_framework import generics, permissions, status
 from rest_framework.response import Response
 from .models import Reservation, GPU
 from .serializers import ReservationCreateSerializer, ReservationListSerializer, GPUListSerializer
 from .services import check_conflict, auto_approve_reservation
-
+from system_integration.utils import notify_gpu_update
 class GPUListView(generics.ListAPIView):
     queryset = GPU.objects.all()
     serializer_class = GPUListSerializer
@@ -15,7 +14,6 @@ class GPUListView(generics.ListAPIView):
 class ReservationCreateView(generics.CreateAPIView):
     serializer_class = ReservationCreateSerializer
     permission_classes = [permissions.IsAuthenticated]
-
     def perform_create(self, serializer):
         reservation = serializer.save(user=self.request.user, status='pending')
         success, msg = auto_approve_reservation(reservation)   # 内部会修改状态并保存
@@ -49,7 +47,6 @@ class PendingReservationListView(generics.ListAPIView):
     """管理员查看所有待审批的预约"""
     serializer_class = ReservationListSerializer
     permission_classes = [permissions.IsAuthenticated, IsAdmin]
-
     def get_queryset(self):
         return Reservation.objects.filter(status='pending').order_by('start_time')
 
@@ -70,6 +67,7 @@ class ApproveReservationView(generics.UpdateAPIView):
         reservation.approver = request.user
         reservation.approved_at = timezone.now()
         reservation.save()
+        notify_gpu_update(action='approved', gpu_id=reservation.gpu_id)
         # TODO: 调用系统权限修改函数，将用户加入GPU组
         return Response({'status': 'approved'})
 
@@ -87,4 +85,6 @@ class RejectReservationView(generics.UpdateAPIView):
         reservation.approver = request.user
         reservation.remark = request.data.get('remark', '')
         reservation.save()
+        notify_gpu_update(action='rejected', gpu_id=reservation.gpu_id)
         return Response({'status': 'rejected'})
+

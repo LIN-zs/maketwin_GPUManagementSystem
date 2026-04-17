@@ -9,7 +9,7 @@ class User(AbstractUser):
         ('admin', '管理员'),
     )
     role = models.CharField(max_length=20, choices=ROLE_CHOICES, default='user')
-    max_concurrent_reservations = models.IntegerField(default=2, help_text='最大同时预约数量')
+    max_concurrent_reservations = models.IntegerField(default=1000, help_text='最大同时预约数量')
     sudo_enabled = models.BooleanField(default=False, help_text='当前是否拥有sudo权限')
 
     class Meta:

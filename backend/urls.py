@@ -30,6 +30,7 @@ urlpatterns = [
     path('api/auth/me/', UserInfoView.as_view()),
     path('', lambda request: redirect('/static/index.html')),   # 根路径重定向
 ]
+
 from rest_framework.urls import path as drf_path
 urlpatterns += [
     drf_path('api-auth/', include('rest_framework.urls')),  # 提供登录/登出

@@ -18,7 +18,7 @@
     .gpu-table th:first-child, .gpu-table td:first-child { min-width: 120px; font-weight: bold; background-color: #fafafa; }
     .cell-free { background-color: #f0f9eb; color: #67c23a; cursor: pointer; transition: all 0.2s; }
     .cell-free:hover { background-color: #e1f3d8; transform: scale(1.02); }
-    .cell-used { background-color: #fef0f0; color: #f56c6c; cursor: not-allowed; }
+    .cell-used { background-color: #fef0f0; color: #f56c6c; cursor: pointer; }  /* 改为 pointer，允许点击查看详情 */
     .admin-panel { margin-top: 20px; border-top: 2px solid #e4e7ed; padding-top: 20px; }
   </style>
 </head>
@@ -130,11 +130,11 @@
     </div>
   </div>
 
-  <!-- 弹窗：填写预约用途 -->
+  <!-- 弹窗1：填写预约用途（空闲格子） -->
   <el-dialog
     title="填写预约用途"
     v-model="selectModal.visible"
-    @close="selectModal = { visible: false, gpuId: '', timeKey: '', timeName: '' }"
+    @close="resetSelectModal"
   >
     <el-form label-width="80px">
       <el-form-item label="显卡">
@@ -149,13 +149,34 @@
       <el-button type="primary" @click="submitReservation">确定</el-button>
     </template>
   </el-dialog>
+
+  <!-- 弹窗2：显示占用详情（已占用格子） -->
+  <el-dialog
+    title="时段已被占用"
+    v-model="occupiedModal.visible"
+    width="500px"
+  >
+    <el-descriptions :column="1" border>
+      <el-descriptions-item label="GPU编号">GPU {{ occupiedModal.gpuId }}</el-descriptions-item>
+      <el-descriptions-item label="时间段">{{ occupiedModal.timeName }}</el-descriptions-item>
+      <el-descriptions-item label="预约人">{{ occupiedModal.username || '未知' }}</el-descriptions-item>
+      <el-descriptions-item label="用途说明">{{ occupiedModal.remark || '无' }}</el-descriptions-item>
+    </el-descriptions>
+    <template #footer>
+      <el-button @click="occupiedModal.visible = false">关闭</el-button>
+    </template>
+  </el-dialog>
 </div>
 
 <script>
 const { createApp, ref, reactive, onMounted } = Vue;
 const { ElMessage } = ElementPlus;
 
+
+
 const API_BASE_URL = "http://127.0.0.1:8000";
+
+
 
 // 辅助函数：获取CSRF Token
 function getCookie(name) {
@@ -193,10 +214,12 @@ createApp({
     ]);
     // 时间段
     const timeSlots = ref([
-      { key: 0, name: "08:00 - 12:00", start: "08:00", end: "12:00" },
-      { key: 1, name: "12:00 - 16:00", start: "12:00", end: "16:00" },
-      { key: 2, name: "16:00 - 20:00", start: "16:00", end: "20:00" },
-      { key: 3, name: "20:00 - 24:00", start: "20:00", end: "24:00" }
+      { key: 0, name: "00:00 - 08:00", start: "00:00", end: "08:00" },
+      { key: 1, name: "08:00 - 12:00", start: "08:00", end: "12:00" },
+      { key: 2, name: "12:00 - 16:00", start: "12:00", end: "16:00" },
+      { key: 3, name: "16:00 - 20:00", start: "16:00", end: "20:00" },
+      { key: 4, name: "20:00 - 24:00", start: "20:00", end: "24:00" }
+
     ]);
 
     // 从后端获取的预约原始数据
@@ -205,9 +228,11 @@ createApp({
     const pendingReservations = ref([]);
     const pendingSudoRequests = ref([]);
 
-    // 弹窗相关
+    // 弹窗1：预约申请弹窗
     const selectModal = reactive({ visible: false, gpuId: "", timeKey: "", timeName: "" });
     const reserveForm = reactive({ reason: "" });
+    // 弹窗2：占用信息弹窗
+    const occupiedModal = reactive({ visible: false, gpuId: "", timeKey: "", timeName: "", username: "", remark: "" });
     const permission = reactive({ desc: "", reason: "" });
 
     // 登录
@@ -224,6 +249,7 @@ createApp({
           isLogin.value = true;
           ElMessage.success("登录成功");
           await fetchAllData();
+          connectWebSocket();
         }
       } catch (e) {
         ElMessage.error("登录失败，请检查网络或用户名密码");
@@ -232,6 +258,7 @@ createApp({
 
     const logout = async () => {
       await axios.post(`${API_BASE_URL}/api/auth/logout/`);
+      disconnectWebSocket();
       isLogin.value = false;
       currentUser.value = {};
       ElMessage.success("已退出");
@@ -249,7 +276,6 @@ createApp({
       const dateStr = selectedDate.value;
       const slot = timeSlots.value[timeKey];
       if (!slot) return true;
-      // 构建起止时间
       const startDateTime = `${dateStr} ${slot.start}:00`;
       const endDateTime = `${dateStr} ${slot.end}:00`;
       // 查找是否有重叠的已批准预约
@@ -264,50 +290,171 @@ createApp({
       });
     };
 
-    // 打开预约弹窗
+    // 获取某个格子被占用的详细信息（从 reservations 中查找）
+    const getOccupiedInfo = (gpuId, timeKey) => {
+      if (!selectedDate.value) return null;
+      const dateStr = selectedDate.value;
+      const slot = timeSlots.value[timeKey];
+      if (!slot) return null;
+      const startDateTime = `${dateStr} ${slot.start}:00`;
+      const endDateTime = `${dateStr} ${slot.end}:00`;
+      const occupiedRes = reservations.value.find(r => {
+        if (r.gpu.id !== gpuId) return false;
+        if (r.status !== 'approved') return false;
+        const rStart = new Date(r.start_time);
+        const rEnd = new Date(r.end_time);
+        const start = new Date(startDateTime);
+        const end = new Date(endDateTime);
+        return (start < rEnd && end > rStart);
+      });
+      return occupiedRes;
+    };
+
+    // 打开弹窗（根据空闲或占用）
     const openSelectModal = (gpuId, timeKey, timeName) => {
-      if (!isFree(gpuId, timeKey)) {
-        ElMessage.warning("该时段已被占用");
-        return;
+      if (isFree(gpuId, timeKey)) {
+        // 空闲：打开预约申请弹窗
+        selectModal.gpuId = gpuId;
+        selectModal.timeKey = timeKey;
+        selectModal.timeName = timeName;
+        selectModal.visible = true;
+        reserveForm.reason = "";
+      } else {
+        // 已占用：打开占用详情弹窗
+        const info = getOccupiedInfo(gpuId, timeKey);
+        occupiedModal.gpuId = gpuId;
+        occupiedModal.timeKey = timeKey;
+        occupiedModal.timeName = timeName;
+        occupiedModal.username = info?.user || '未知';   // 直接取字符串
+        occupiedModal.remark = info?.remark || '无';
+        occupiedModal.visible = true;
       }
-      selectModal.gpuId = gpuId;
-      selectModal.timeKey = timeKey;
-      selectModal.timeName = timeName;
-      selectModal.visible = true;
-      reserveForm.reason = "";
     };
 
     // 提交预约
-    const submitReservation = async () => {
-      if (!reserveForm.reason.trim()) {
-        ElMessage.warning("请输入用途说明");
-        return;
-      }
-      if (!selectedDate.value) {
-        ElMessage.warning("请选择日期");
-        return;
-      }
-      const slot = timeSlots.value[selectModal.timeKey];
-      const start_time = `${selectedDate.value} ${slot.start}:00`;
-      const end_time = `${selectedDate.value} ${slot.end}:00`;
-      try {
-        await axios.post(`${API_BASE_URL}/api/reservations/reservations/create/`, {
-          gpu: selectModal.gpuId,
-          start_time: start_time,
-          end_time: end_time,
-          remark: reserveForm.reason
-        });
-        ElMessage.success("预约提交成功");
-        selectModal.visible = false;
-        await fetchReservations();
-        // 如果是管理员，刷新待审批列表
+
+// WebSocket 相关
+const ws = ref(null);
+const wsConnected = ref(false);
+const wsReconnectTimer = ref(null);
+
+// 建立 WebSocket 连接
+const connectWebSocket = () => {
+  if (ws.value && ws.value.readyState === WebSocket.OPEN) return;
+
+  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const wsUrl = `${protocol}//${window.location.host}/ws/gpu-updates/`;
+
+  ws.value = new WebSocket(wsUrl);
+
+  ws.value.onopen = () => {
+    console.log('WebSocket 连接成功');
+    wsConnected.value = true;
+    if (wsReconnectTimer.value) {
+      clearTimeout(wsReconnectTimer.value);
+      wsReconnectTimer.value = null;
+    }
+  };
+
+  ws.value.onmessage = (event) => {
+    try {
+      const data = JSON.parse(event.data);
+      if (data.type === 'reservation_update') {
+        console.log('收到预约更新通知:', data.data);
+        // 刷新预约表格
+        fetchReservations();
+        // 若当前用户是管理员，同时刷新待审批列表
         if (currentUser.value.role === 'admin') {
           fetchPendingReservations();
         }
-      } catch (e) {
-        ElMessage.error("预约失败：" + (e.response?.data?.non_field_errors?.[0] || "未知错误"));
       }
-    };
+    } catch (e) {
+      console.error('解析 WebSocket 消息失败:', e);
+    }
+  };
+
+  ws.value.onerror = (error) => {
+    console.error('WebSocket 错误:', error);
+    wsConnected.value = false;
+  };
+
+  ws.value.onclose = () => {
+    console.log('WebSocket 连接关闭');
+    wsConnected.value = false;
+    // 自动重连（5 秒后）
+    wsReconnectTimer.value = setTimeout(() => {
+      connectWebSocket();
+    }, 5000);
+  };
+};
+
+// 断开 WebSocket
+const disconnectWebSocket = () => {
+  if (ws.value) {
+    ws.value.close();
+    ws.value = null;
+  }
+  if (wsReconnectTimer.value) {
+    clearTimeout(wsReconnectTimer.value);
+    wsReconnectTimer.value = null;
+  }
+  wsConnected.value = false;
+};
+
+const isSubmitting = ref(false);
+
+const submitReservation = async () => {
+
+  if (isSubmitting.value) {
+    ElMessage.warning("正在提交，请勿重复点击");
+    return;
+  }
+  isSubmitting.value = true;
+  if (!reserveForm.reason.trim()) {
+    ElMessage.warning("请输入用途说明");
+    return;
+  }
+  if (!selectedDate.value) {
+    ElMessage.warning("请选择日期");
+    return;
+  }
+  const slot = timeSlots.value[selectModal.timeKey];
+
+  // 拼接完整的日期时间字符串（ISO 8601 格式，不含时区后缀）
+  let startTimeStr = `${selectedDate.value}T${slot.start}:00`;
+  let endTimeStr = `${selectedDate.value}T${slot.end}:00`;
+
+  // 处理 24:00 特殊情况（转为次日 00:00）
+  if (slot.end === "24:00") {
+    const nextDate = new Date(selectedDate.value);
+    nextDate.setDate(nextDate.getDate() + 1);
+    const year = nextDate.getFullYear();
+    const month = String(nextDate.getMonth() + 1).padStart(2, '0');
+    const day = String(nextDate.getDate()).padStart(2, '0');
+    endTimeStr = `${year}-${month}-${day}T00:00:00`;
+  }
+
+  try {
+    await axios.post(`${API_BASE_URL}/api/reservations/reservations/create/`, {
+      gpu: selectModal.gpuId,
+      start_time: startTimeStr,
+      end_time: endTimeStr,
+      remark: reserveForm.reason
+    });
+    ElMessage.success("预约提交成功");
+    selectModal.visible = false;
+    await fetchReservations();
+    if (currentUser.value.role === 'admin') {
+      fetchPendingReservations();
+    }
+  } catch (e) {
+    const errorMsg = e.response?.data?.non_field_errors?.[0]
+                  || e.response?.data?.detail
+                  || "未知错误";
+    ElMessage.error("预约失败：" + errorMsg);
+  }finally{
+  isSubmitting.value = false;}
+};
 
     // 权限申请
     const submitPermission = async () => {
@@ -333,28 +480,27 @@ createApp({
       pendingReservations.value = res.data;
     };
 
-// 批准
-const approveReservation = async (id) => {
-  try {
-    await axios.put(`${API_BASE_URL}/api/reservations/admin/approve/${id}/`);
-    ElMessage.success("已批准");
-    fetchPendingReservations();
-    fetchReservations();
-  } catch (e) {
-    ElMessage.error(e.response?.data?.error || "批准失败");
-  }
-};
+    const approveReservation = async (id) => {
+      try {
+        await axios.put(`${API_BASE_URL}/api/reservations/admin/approve/${id}/`);
+        ElMessage.success("已批准");
+        fetchPendingReservations();
+        fetchReservations();
+      } catch (e) {
+        ElMessage.error(e.response?.data?.error || "批准失败");
+      }
+    };
 
-// 拒绝
-const rejectReservation = async (id) => {
-  try {
-    await axios.put(`${API_BASE_URL}/api/reservations/admin/reject/${id}/`, { remark: "管理员拒绝" });
-    ElMessage.success("已拒绝");
-    fetchPendingReservations();
-  } catch (e) {
-    ElMessage.error(e.response?.data?.error || "拒绝失败");
-  }
-};
+    const rejectReservation = async (id) => {
+      try {
+        await axios.put(`${API_BASE_URL}/api/reservations/admin/reject/${id}/`, { remark: "管理员拒绝" });
+        ElMessage.success("已拒绝");
+        fetchPendingReservations();
+      } catch (e) {
+        ElMessage.error(e.response?.data?.error || "拒绝失败");
+      }
+    };
+
     // 管理员：待审批Sudo
     const fetchPendingSudo = async () => {
       const res = await axios.get(`${API_BASE_URL}/api/sudo/admin/pending/`);
@@ -381,12 +527,12 @@ const rejectReservation = async (id) => {
     };
 
     onMounted(() => {
-      // 检查是否已有session（通过访问me接口）
       axios.get(`${API_BASE_URL}/api/auth/me/`).then(res => {
         if (res.data.username) {
           currentUser.value = res.data;
           isLogin.value = true;
           fetchAllData();
+          connectWebSocket();
         }
       }).catch(() => {});
     });
@@ -397,7 +543,8 @@ const rejectReservation = async (id) => {
       isFree, openSelectModal, selectModal, reserveForm, submitReservation,
       login, logout, submitPermission, permission,
       pendingReservations, pendingSudoRequests,
-      approveReservation, rejectReservation, approveSudo, rejectSudo
+      approveReservation, rejectReservation, approveSudo, rejectSudo,
+      occupiedModal,wsConnected,
     };
   }
 }).use(ElementPlus).mount('#app');
